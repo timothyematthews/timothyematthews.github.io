@@ -1,0 +1,254 @@
+---
+title: "Predicting Movie Performance"
+output: html_document
+---
+
+#Introduction
+When is the best time to go see a movie?
+Will this movie be good?
+There are always arguments about whether a movie is good or not. It is a subjective idea.
+However there are ways to form a somewhat objective standpoint. We can look at how much money a movie makes
+and the average ratings of people who have seen the movie.
+Using , I will show how to use the data in order to create models to predict movie profits and ratings based on budgets and release month.
+
+#1. Setting Up The Data
+Start by downloading the data set from [links](https://www.kaggle.com/tmdb/tmdb-movie-metadata).
+This data set will have two CSV files, we want to use the one named "tmdb_5000_movies.CSV".
+There are a lot of unecessary and ugly columns so we are going to select the
+budget, revenue, vote_average, and original_title columns
+I also add a column called profit for the profit of the movie (Revenue - Budget), this ensures that we are using values for 
+how much money a movie makes that is relative to that movie.
+
+
+```{r}
+library(tidyverse)
+options(warn=-1)
+
+movies_raw <- read_csv("tmdb_5000_movies.csv")
+movies_clean <- movies_raw %>%
+  select(original_title, budget, revenue, vote_average, release_date)%>%
+  filter(budget > 100)%>%
+  filter(revenue > 0)%>%
+  mutate(profit = revenue - budget)
+
+
+
+movies_clean
+```
+##Cleaning it up a bit
+The data is almost clean, however; the budget, revenue, and profits are all very large numbers.
+So I am going to add another column all profit_factor. This will be calculated by Revenue/Budget. This will give much smaller and easier to read numbers
+We only want to examine the release month of the movie, so we grab a substring of the raw release date and treat it as a numeric for easier use later on.
+I create a bionmial column to see if a movie has a good profit_factor, which is just a little bit above the profit_factor mean of 12.
+I do the same for a good_rating of a movie, which is about 1 standard deviation above the mean of 6.
+```{r}
+movies_clean$profit <- ifelse(movies_clean$profit < 0, 0, movies_clean$profit)
+movies_clean <- movies_clean %>%
+  mutate(profit_factor = revenue/budget) %>%
+  mutate(release_month = as.numeric(substr(release_date,6,7)))%>%
+    mutate(good_profit = ifelse(profit_factor > 15, 1,0))%>%
+    mutate(good_rating = ifelse(vote_average > 7,1,0))
+
+movies_clean
+
+```
+
+#2. Exploratory Data Analysis
+##Examining Variables
+##Budget and Revenue
+Looking at both the budget and revenue of films in a histogram does show a very similar distribution. This COULD indicate a cooreleation; but, we need to look more into that.
+```{r}
+library(ggplot2)
+qplot(movies_clean$budget, geom="histogram", bins="50")
+qplot(movies_clean$revenue, geom="histogram", bins="50")
+
+```
+
+##Release Month
+Now lets take a look at release months.
+I made a barplot with the release month on the x-axis and the movie count for that month on the y-axis.
+The distribution of months does seem relatively even throughout the year,
+expect for a small dip upwards in September, October, and December. This could be for
+the holiday season. Initally, I do not think there will be a coorelation
+```{r}
+barplot(table(movies_clean$release_month), xlab="Movies released per month")
+avg <- mean(movies_clean$profit_factor)
+avg
+sdd <- sd(movies_clean$profit_factor)
+sdd
+```
+##Average Rating
+Now lets make a barplot examining the avreage vote of the movies
+```{r}
+barplot(table(movies_clean$vote_average), xlab="Average movie rating")
+mean_rating <- mean(movies_clean$vote_average)
+sd_rating <- sd(movies_clean$vote_average)
+```
+
+This looks like a mostly normal curve centered around a rating of 6~. It does have a tail towards the left and an interesting amount of 0 
+The calculated mean of 6.092172 supports this. This is used to determinine what a good movie is.
+
+#Multiple Varibles
+#Release Month
+Now lets look at variables plotted agaisnt eachother
+I am going to start by making a scatter plot of movie ratings across months to see if we can notice a trend
+```{r}
+movies_clean %>%
+  ggplot(aes(x=release_month, y=vote_average)) + geom_point()
+
+```
+So right off the bat, it does not appear that release month affects the vote average, but we'll get more into that when we look at the predictions
+
+Now lets look at profit factors across months to see if we can notice a trend
+We temporarily filter to remove some outliters to get a better picture, then filter again to get a closer picture
+```{r}
+movies_clean %>%
+  filter(movies_clean$profit_factor<2500)%>%
+  ggplot(aes(x=release_month, y=profit_factor)) + geom_point()
+movies_clean %>%
+  filter(movies_clean$profit_factor<150)%>%
+  ggplot(aes(x=release_month, y=profit_factor)) + geom_point()
+
+```
+Based on the second filtered graph, it does appear that most months have a pretty similar profit factor. However, appearance wise it seems there is a small increase during september.
+This could be due to summer blockbusters.
+
+Now we're going to compare budget to average rating and profit factor just like previously with release month
+
+```{r}
+movies_clean %>%
+  ggplot(aes(x=budget, y=vote_average)) + geom_point()
+
+```
+Based on just the appearence, there doesn't seem to be a trend. One important thing to note is that there are a lot more low budget movies than high budget.
+```{r}
+movies_clean %>%
+  filter(movies_clean$profit_factor<2500)%>%
+  ggplot(aes(x=budget, y=profit_factor)) + geom_point()
+movies_clean %>%
+  filter(movies_clean$profit_factor<150)%>%
+  ggplot(aes(x=budget, y=profit_factor)) + geom_point()
+
+```
+It does appear that lower budget movies tend to have more high profit factors.
+
+#3. Machine Learning
+We are going to be using ML techniques in order to build a model to predict movie performance.
+We are going to create 3 models to predict either whether a movie has a good profit or ratings.
+We will make a regression model, a tree, and a random forest.
+Here we start with predicting if a movie will have good profit. Our predictors and release_month and budget as mentioned above
+
+```{r}
+library(randomForest)
+library(tree)
+library(caret)
+testdata <- movies_clean %>%
+  select(good_profit,release_month,budget)
+
+movies_clean$profit_factor <- as.numeric(movies_clean$profit_factor)
+
+set.seed(12345)
+index <- sample(1:nrow(testdata),.5*nrow(testdata),replace=F)
+traindata <- testdata[index,]
+traindata$good_profit <- as.numeric(traindata$good_profit)
+validdata <- testdata[-index,]
+
+logis_fit <- glm(good_profit~., data = traindata, family ="binomial")
+logis_pred <- ifelse(predict(logis_fit, newdata=validdata,type ="response")>0.5,1,0)
+logis_error <- mean(validdata$good_profit != logis_pred)
+logis_error
+
+traindata$good_profit <- as.factor(traindata$good_profit)
+validdata$good_profit <- as.factor(validdata$good_profit)
+
+tree_fit <- tree(good_profit~., data = traindata)
+pruned_tree <-prune.tree(tree_fit, best = 3)
+
+tree_pred <- predict(pruned_tree, newdata=validdata, type = "class")
+tree_error <- mean(validdata$good_profit != tree_pred)
+
+tree_error
+
+
+```
+
+```{r}
+library(ROCR)
+library(pROC)
+sampels <- sample(nrow(movies_clean), nrow(movies_clean)*.5)
+forest <- train(good_profit~., data = traindata)
+result_pred <- predict(forest, validdata, type = "prob")
+result_roc <- roc(validdata$good_profit, result_pred$"0")
+plot(result_roc , print.thres="best", print.thres.best.method="closest.topleft")
+
+result.coords <- coords(result_roc, "best", best.method="closest.topleft", ret=c("threshold", "accuracy"))
+print(result.coords)
+auc(result_roc)
+```
+##Analysis of predicting profit
+Our error rates for the regression model and the tree were both a little above 0.05. Unfortunately we do have to reject these; however, there are quite close.
+The AUC for the randomForest ROC is 0.802, which is further away from accuracy than the previous two models, so we definetly rejecet this one.
+
+
+
+
+##Good Rating
+```{r}
+library(randomForest)
+library(tree)
+library(caret)
+testdata <- movies_clean %>%
+  select(good_rating,release_month,budget)
+
+
+set.seed(12345)
+index <- sample(1:nrow(testdata),.5*nrow(testdata),replace=F)
+traindata <- testdata[index,]
+traindata$good_rating <- as.numeric(traindata$good_rating)
+validdata <- testdata[-index,]
+
+logis_fit <- glm(good_rating~., data = traindata, family ="binomial")
+logis_pred <- ifelse(predict(logis_fit, newdata=validdata,type ="response")>0.5,1,0)
+logis_error <- mean(validdata$good_rating != logis_pred)
+logis_error
+
+traindata$good_rating <- as.factor(traindata$good_rating)
+validdata$good_rating <- as.factor(validdata$good_rating)
+
+tree_fit <- tree(good_rating~., data = traindata)
+pruned_tree <-prune.tree(tree_fit, best = 3)
+
+tree_pred <- predict(pruned_tree, newdata=validdata, type = "class")
+tree_error <- mean(validdata$good_rating != tree_pred)
+
+tree_error
+
+
+```
+```{r}
+library(ROCR)
+library(pROC)
+sampels <- sample(nrow(movies_clean), nrow(movies_clean)*.5)
+forest <- train(good_rating~., data = traindata)
+result_pred <- predict(forest, validdata, type = "prob")
+result_roc <- roc(validdata$good_rating, result_pred$"0")
+plot(result_roc , print.thres="best", print.thres.best.method="closest.topleft")
+
+result.coords <- coords(result_roc, "best", best.method="closest.topleft", ret=c("threshold", "accuracy"))
+print(result.coords)
+auc(result_roc)
+
+```
+##Analysis of predicting rating
+The error ratings for both the regression model and the tree are both 0.199, which is far more than 0.05.
+The AUC for the random Forest is unfortunately way too low too.
+As a result, we cannot use any of our predictors to see if a movie will have a good rating or not
+
+##What have we learned
+Overall, we learned that we cannot predict a movies' profit factor or rating based on the month it was released and the budget.
+Predicting profit factor is close, but not close enough. With more tests we might be able to find an accurate model.
+So what is the best movie to see? Whatever movie you are interested in! You shouldn't care about profit or ratings, go watch what is interesting to you!
+
+
+```
+
